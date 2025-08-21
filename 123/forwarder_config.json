@@ -1,0 +1,16 @@
+{
+  "/add": {
+    "source_chat_ids": [
+      -1002909122281
+    ],
+    "target_chat_id": -1002949844246,
+    "title": "Группа add"
+  },
+  "/error": {
+    "source_chat_ids": [
+      -1002909122281
+    ],
+    "target_chat_id": -1003063232761,
+    "title": "Группа error"
+  }
+}

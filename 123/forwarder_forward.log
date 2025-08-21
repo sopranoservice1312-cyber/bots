@@ -1,0 +1,7 @@
+{"time": "2025-08-18 22:07:40", "command": "/add", "from_chat": -1002909122281, "to_chat": -1002949844246, "text": "000 200", "status": "success", "error": ""}
+{"time": "2025-08-18 22:08:00", "command": "/add", "from_chat": -1002909122281, "to_chat": -1002949844246, "text": "000 200", "status": "success", "error": ""}
+{"time": "2025-08-18 22:08:10", "command": "/error", "from_chat": -1002909122281, "to_chat": -1003063232761, "text": "000 200", "status": "success", "error": ""}
+{"time": "2025-08-18 22:37:20", "command": "/add", "from_chat": -1002909122281, "to_chat": -1002949844246, "text": "000 200", "status": "success", "error": ""}
+{"time": "2025-08-18 22:37:29", "command": "/error", "from_chat": -1002909122281, "to_chat": -1003063232761, "text": "000 200", "status": "success", "error": ""}
+{"time": "2025-08-18 22:50:34", "command": "/add", "from_chat": -1002909122281, "to_chat": -1002949844246, "text": "12345 300", "status": "success", "error": ""}
+{"time": "2025-08-18 22:52:21", "command": "/error", "from_chat": -1002909122281, "to_chat": -1003063232761, "text": "53738393939\nTerrier\n74848493040\nSandmen’s", "status": "success", "error": ""}

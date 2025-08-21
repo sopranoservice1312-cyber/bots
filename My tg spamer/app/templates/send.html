@@ -1,0 +1,83 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class='card'>
+  <h2>Send Messages</h2>
+  <form method='post' action='/send/dispatch'>
+    <div class='row'>
+      <div>
+        <label>Send from accounts (choose one or more)</label>
+        <select name='account_ids' multiple size='4' required>
+          {% for a in accounts %}
+          <option value='{{a.id}}'>{{a.phone}}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label>Templates (choose one or more)</label>
+        <select name='template_ids' multiple size='6' required>
+          {% for t in templates %}
+          <option value='{{t.id}}'>{{t.title}}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+    <label>Targets (one per line: @username, t.me/link, numeric id, or phone)</label>
+    <textarea name='targets_text' rows='8' placeholder='@username1\nhttps://t.me/yourchat\n+380...'></textarea>
+    <label><input type='checkbox' name='randomize' value='true'> Randomize templates</label>
+    <label><input type="checkbox" name="is_cyclic" value="true" id="cycbox" onchange="document.getElementById('cycle_minutes_box').style.display=this.checked?'block':'none'"> Repeat sending (cyclic)</label>
+    <div id="cycle_minutes_box" style="display:none">
+      <label>Interval (minutes)</label>
+      <input name="cycle_minutes" type="number" min="1" placeholder="60">
+    </div>
+    <label>Schedule at (ISO 8601, e.g. 2025-08-14T20:30:00+03:00 — leave empty to send now)</label>
+    <input name='schedule_at' placeholder='2025-08-14T20:30:00+03:00'>
+    <label>Global context (JSON for placeholders, optional)</label>
+    <textarea name='global_ctx' rows='4' placeholder='{"campaign":"August"}'></textarea>
+    <button type='submit'>Create Job</button>
+  </form>
+</div>
+<div class='card'>
+  <h2>Or Upload CSV</h2>
+  <form method='post' action='/send/upload_csv' enctype='multipart/form-data'>
+    <div class='row'>
+      <div>
+        <label>Send from accounts (choose one or more)</label>
+        <select name='account_ids' multiple size='4' required>
+          {% for a in accounts %}
+          <option value='{{a.id}}'>{{a.phone}}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label>Templates (choose one or more)</label>
+        <select name='template_ids' multiple size='6' required>
+          {% for t in templates %}
+          <option value='{{t.id}}'>{{t.title}}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+    <label>CSV file (columns: username, phone, chat_link, and any extra for placeholders)</label>
+    <input name='file' type='file' required>
+    <label><input type='checkbox' name='randomize' value='true'> Randomize templates</label>
+    <label><input type="checkbox" name="is_cyclic" value="true" id="cycbox2" onchange="document.getElementById('cycle_minutes_box2').style.display=this.checked?'block':'none'"> Repeat sending (cyclic)</label>
+    <div id="cycle_minutes_box2" style="display:none">
+      <label>Interval (minutes)</label>
+      <input name="cycle_minutes" type="number" min="1" placeholder="60">
+    </div>
+    <label>Schedule at (ISO 8601)</label>
+    <input name='schedule_at' placeholder=''>
+    <label>Global context (JSON, optional)</label>
+    <textarea name='global_ctx' rows='4' placeholder='{"campaign":"August"}'></textarea>
+    <button type='submit'>Upload & Create Job</button>
+  </form>
+</div>
+<script>
+document.addEventListener('DOMContentLoaded', function(){
+  let cycbox = document.getElementById('cycbox');
+  let cycbox2 = document.getElementById('cycbox2');
+  if(cycbox) cycbox.onchange();
+  if(cycbox2) cycbox2.onchange();
+});
+</script>
+{% endblock %}

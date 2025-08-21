@@ -1,0 +1,4 @@
+username,phone,chat_link,name,order_id
+alex_user,,https://t.me/testgroup,Alex,ORD-001
+, +380123456789,,Maria,ORD-002
+john_doe,,,John,ORD-003
