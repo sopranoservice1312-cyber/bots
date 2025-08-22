@@ -190,15 +190,17 @@ async def send_dispatch(
         targets_blob = targets_text
     else:
         targets_blob = "[]"
+
     now = datetime.now(timezone.utc)
     sched_at = None
     if schedule_at:
         sched_at = datetime.fromisoformat(schedule_at)
         if sched_at.tzinfo is None:
             sched_at = sched_at.replace(tzinfo=timezone.utc)
-cycle_val = int(cycle_minutes) if is_cyclic and cycle_minutes and cycle_minutes.strip() else None
 
-job = Job(
+    cycle_val = int(cycle_minutes) if is_cyclic and cycle_minutes and cycle_minutes.strip() else None
+
+    job = Job(
         status="queued" if not schedule_at else "scheduled",
         account_id=None,
         targets_blob=targets_blob,
@@ -209,12 +211,13 @@ job = Job(
         account_ids_blob=json.dumps(account_ids),
         is_cyclic=bool(is_cyclic),
         cycle_minutes=cycle_val,
-       next_run_at=now + timedelta(minutes=cycle_val) if is_cyclic and cycle_val else None
-   )
+        next_run_at=now + timedelta(minutes=cycle_val) if is_cyclic and cycle_val else None
+    )
     db.add(job)
     await db.commit()
     logger.info(f"Send job dispatched: {job.id} status={job.status} schedule_at={job.schedule_at}")
     return RedirectResponse("/logs", status_code=303)
+
 
 @app.post("/send/upload_csv")
 async def upload_csv(
