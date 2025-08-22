@@ -22,13 +22,15 @@ from .sender import process_job
 from .csv_utils import parse_csv
 
 app = FastAPI(title="Telegram Consent Messenger — Pro")
+
 @app.get("/")
 async def root():
     return {"message": "hello from railway"}
-
+    
 @app.get("/health")
 async def health():
     return {"ok": True}
+
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
