@@ -23,10 +23,6 @@ from .csv_utils import parse_csv
 
 app = FastAPI(title="Telegram Consent Messenger — Pro")
 
-@app.get("/")
-async def root():
-    return {"message": "hello from railway"}
-    
 @app.get("/health")
 async def health():
     return {"ok": True}
