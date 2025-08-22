@@ -183,7 +183,7 @@ async def send_dispatch(
     schedule_at: str | None = Form(None),
     global_ctx: str | None = Form(None),
     is_cyclic: bool = Form(False),
-    cycle_minutes: int | None = Form(None),
+    cycle_minutes: str | None = Form(None),
     db: AsyncSession = Depends(get_db)
 ):
     if targets_text.strip():
@@ -196,6 +196,8 @@ async def send_dispatch(
         sched_at = datetime.fromisoformat(schedule_at)
         if sched_at.tzinfo is None:
             sched_at = sched_at.replace(tzinfo=timezone.utc)
+   cycle_val = int(cycle_minutes) if is_cyclic and cycle_minutes and cycle_minutes.strip() else None
+
     job = Job(
         status="queued" if not schedule_at else "scheduled",
         account_id=None,
@@ -206,9 +208,9 @@ async def send_dispatch(
         context_json=json.loads(global_ctx) if global_ctx else None,
         account_ids_blob=json.dumps(account_ids),
         is_cyclic=bool(is_cyclic),
-        cycle_minutes=int(cycle_minutes) if is_cyclic and cycle_minutes else None,
-        next_run_at=now + timedelta(minutes=int(cycle_minutes)) if is_cyclic and cycle_minutes else None
-    )
+        cycle_minutes=cycle_val,
+       next_run_at=now + timedelta(minutes=cycle_val) if is_cyclic and cycle_val else None
+   )
     db.add(job)
     await db.commit()
     logger.info(f"Send job dispatched: {job.id} status={job.status} schedule_at={job.schedule_at}")
@@ -223,7 +225,7 @@ async def upload_csv(
     schedule_at: str | None = Form(None),
     global_ctx: str | None = Form(None),
     is_cyclic: bool = Form(False),
-    cycle_minutes: int | None = Form(None),
+    cycle_minutes: str | None = Form(None),
     db: AsyncSession = Depends(get_db)
 ):
     data = await file.read()
@@ -237,6 +239,8 @@ async def upload_csv(
         sched_at = datetime.fromisoformat(schedule_at)
         if sched_at.tzinfo is None:
             sched_at = sched_at.replace(tzinfo=timezone.utc)
+    cycle_val = int(cycle_minutes) if is_cyclic and cycle_minutes and cycle_minutes.strip() else None
+
     job = Job(
         status="queued" if not schedule_at else "scheduled",
         account_id=None,
@@ -247,8 +251,8 @@ async def upload_csv(
         context_json=json.loads(global_ctx) if global_ctx else None,
         account_ids_blob=json.dumps(account_ids),
         is_cyclic=bool(is_cyclic),
-        cycle_minutes=int(cycle_minutes) if is_cyclic and cycle_minutes else None,
-        next_run_at=now + timedelta(minutes=int(cycle_minutes)) if is_cyclic and cycle_minutes else None
+        cycle_minutes=cycle_val,
+        next_run_at=now + timedelta(minutes=cycle_val) if is_cyclic and cycle_val else None
     )
     db.add(job)
     await db.commit()
