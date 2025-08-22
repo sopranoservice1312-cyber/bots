@@ -1,8 +1,0 @@
-fastapi
-uvicorn[standard]
-jinja2
-sqlalchemy>=1.4
-aiosqlite
-telethon
-python-dotenv
-python-multipart
