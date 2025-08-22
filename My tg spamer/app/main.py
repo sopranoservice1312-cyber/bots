@@ -196,9 +196,9 @@ async def send_dispatch(
         sched_at = datetime.fromisoformat(schedule_at)
         if sched_at.tzinfo is None:
             sched_at = sched_at.replace(tzinfo=timezone.utc)
-   cycle_val = int(cycle_minutes) if is_cyclic and cycle_minutes and cycle_minutes.strip() else None
+cycle_val = int(cycle_minutes) if is_cyclic and cycle_minutes and cycle_minutes.strip() else None
 
-    job = Job(
+job = Job(
         status="queued" if not schedule_at else "scheduled",
         account_id=None,
         targets_blob=targets_blob,
