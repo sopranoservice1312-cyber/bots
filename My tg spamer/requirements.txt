@@ -1,5 +1,5 @@
+uvicorn[standard]
 fastapi
-uvicorn
 jinja2
 sqlalchemy>=1.4
 aiosqlite
