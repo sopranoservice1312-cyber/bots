@@ -3,7 +3,7 @@ import json
 import asyncio
 from datetime import datetime, timezone, timedelta
 
-from .logging_setup import setup_logging  # Добавлено!
+from .logging_setup import setup_logging
 setup_logging()
 
 import logging
@@ -13,7 +13,7 @@ from fastapi import FastAPI, Depends, Request, Form, UploadFile, File
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
+from sqlalchemy import select
 from .database import Base, engine, get_db
 from .models import Account, Template, MessageLog, Job
 from .telethon_manager import telethon_manager
@@ -23,12 +23,9 @@ from .csv_utils import parse_csv
 
 app = FastAPI(title="Telegram Consent Messenger — Pro")
 
-@app.get("/health")
-async def health():
-    return {"ok": True}
-
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
+
 
 def ensure_aware(dt):
     if dt is None:
@@ -37,6 +34,17 @@ def ensure_aware(dt):
         return dt.replace(tzinfo=timezone.utc)
     return dt
 
+
+def safe_json_parse(raw: str | None):
+    if not raw or not raw.strip():
+        return None
+    try:
+        return json.loads(raw)
+    except Exception as e:
+        logger.warning(f"Invalid JSON in global_ctx: {e}. Raw value: {raw!r}")
+        return None
+
+
 @app.on_event("startup")
 async def startup():
     async with engine.begin() as conn:
@@ -44,17 +52,23 @@ async def startup():
     logger.info("Application startup complete. Launching scheduler.")
     asyncio.create_task(scheduler())
 
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request, db: AsyncSession = Depends(get_db)):
     accounts = (await db.execute(select(Account))).scalars().all()
     templates_rows = (await db.execute(select(Template))).scalars().all()
     jobs = (await db.execute(select(Job).order_by(Job.id.desc()).limit(20))).scalars().all()
-    return templates.TemplateResponse("index.html", {"request": request, "accounts": accounts, "templates": templates_rows, "jobs": jobs})
+    return templates.TemplateResponse(
+        "index.html",
+        {"request": request, "accounts": accounts, "templates": templates_rows, "jobs": jobs}
+    )
+
 
 @app.get("/accounts", response_class=HTMLResponse)
 async def accounts_page(request: Request, db: AsyncSession = Depends(get_db)):
     accounts = (await db.execute(select(Account))).scalars().all()
     return templates.TemplateResponse("accounts.html", {"request": request, "accounts": accounts})
+
 
 @app.post("/accounts/add")
 async def add_account(
@@ -64,7 +78,9 @@ async def add_account(
     api_hash: str | None = Form(None),
     db: AsyncSession = Depends(get_db)
 ):
-    session_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "sessions", f"{phone.replace('+','plus')}.session"))
+    session_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "sessions", f"{phone.replace('+','plus')}.session")
+    )
     acc = Account(
         phone=phone,
         name=name,
@@ -78,6 +94,7 @@ async def add_account(
     logger.info(f"Account added: {phone}")
     return RedirectResponse("/accounts", status_code=303)
 
+
 @app.post("/accounts/add_and_login")
 async def add_and_login(
     phone: str = Form(...),
@@ -86,7 +103,9 @@ async def add_and_login(
     api_hash: str | None = Form(None),
     db: AsyncSession = Depends(get_db)
 ):
-    session_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "sessions", f"{phone.replace('+','plus')}.session"))
+    session_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "sessions", f"{phone.replace('+','plus')}.session")
+    )
     acc = Account(
         phone=phone,
         name=name,
@@ -103,9 +122,10 @@ async def add_and_login(
     logger.info(f"Account added and login started: {phone}")
     return RedirectResponse(f"/accounts/{acc.id}/login", status_code=303)
 
+
 @app.post("/accounts/{acc_id}/delete")
 async def delete_account(acc_id: int, db: AsyncSession = Depends(get_db)):
-    acc = (await db.execute(select(Account).where(Account.id==acc_id))).scalars().first()
+    acc = (await db.execute(select(Account).where(Account.id == acc_id))).scalars().first()
     if acc:
         try:
             if acc.session_path and os.path.exists(acc.session_path):
@@ -117,22 +137,25 @@ async def delete_account(acc_id: int, db: AsyncSession = Depends(get_db)):
         logger.info(f"Deleted account: {acc_id}")
     return RedirectResponse("/accounts", status_code=303)
 
+
 @app.post("/accounts/{acc_id}/login/start")
 async def login_start(acc_id: int, db: AsyncSession = Depends(get_db)):
-    acc = (await db.execute(select(Account).where(Account.id==acc_id))).scalar_one()
+    acc = (await db.execute(select(Account).where(Account.id == acc_id))).scalar_one()
     phone_code_hash = await telethon_manager.start_login(acc.phone, api_id=acc.api_id, api_hash=acc.api_hash)
     acc.phone_code_hash = phone_code_hash
     await db.commit()
     logger.info(f"Login started for account: {acc.phone}")
     return RedirectResponse(f"/accounts/{acc_id}/login", status_code=303)
 
+
 @app.get("/accounts/{acc_id}/login", response_class=HTMLResponse)
 async def login_code_page(request: Request, acc_id: int):
     return templates.TemplateResponse("login_code.html", {"request": request, "acc_id": acc_id})
 
+
 @app.post("/accounts/{acc_id}/login/verify")
 async def login_verify(acc_id: int, code: str = Form(...), password: str | None = Form(None), db: AsyncSession = Depends(get_db)):
-    acc = (await db.execute(select(Account).where(Account.id==acc_id))).scalar_one()
+    acc = (await db.execute(select(Account).where(Account.id == acc_id))).scalar_one()
     await telethon_manager.finalize_login(
         acc.phone,
         code=code,
@@ -147,10 +170,12 @@ async def login_verify(acc_id: int, code: str = Form(...), password: str | None 
     logger.info(f"Login verified for account: {acc.phone}")
     return RedirectResponse("/accounts", status_code=303)
 
+
 @app.get("/templates", response_class=HTMLResponse)
 async def templates_page(request: Request, db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(Template))).scalars().all()
     return templates.TemplateResponse("templates.html", {"request": request, "rows": rows})
+
 
 @app.post("/templates/add")
 async def templates_add(title: str = Form(...), body: str = Form(...), db: AsyncSession = Depends(get_db)):
@@ -159,20 +184,23 @@ async def templates_add(title: str = Form(...), body: str = Form(...), db: Async
     logger.info(f"Template added: {title}")
     return RedirectResponse("/templates", status_code=303)
 
+
 @app.post("/templates/{tpl_id}/delete")
 async def templates_delete(tpl_id: int, db: AsyncSession = Depends(get_db)):
-    row = (await db.execute(select(Template).where(Template.id==tpl_id))).scalars().first()
+    row = (await db.execute(select(Template).where(Template.id == tpl_id))).scalars().first()
     if row:
         await db.delete(row)
         await db.commit()
         logger.info(f"Template deleted: {tpl_id}")
     return RedirectResponse("/templates", status_code=303)
 
+
 @app.get("/send", response_class=HTMLResponse)
 async def send_page(request: Request, db: AsyncSession = Depends(get_db)):
-    accounts = (await db.execute(select(Account).where(Account.is_authorized==True))).scalars().all()
+    accounts = (await db.execute(select(Account).where(Account.is_authorized == True))).scalars().all()
     templates_rows = (await db.execute(select(Template))).scalars().all()
     return templates.TemplateResponse("send.html", {"request": request, "accounts": accounts, "templates": templates_rows})
+
 
 @app.post("/send/dispatch")
 async def send_dispatch(
@@ -207,7 +235,7 @@ async def send_dispatch(
         template_ids_blob=json.dumps(template_ids),
         randomize=bool(randomize),
         schedule_at=sched_at,
-        context_json=json.loads(global_ctx) if global_ctx else None,
+        context_json=safe_json_parse(global_ctx),
         account_ids_blob=json.dumps(account_ids),
         is_cyclic=bool(is_cyclic),
         cycle_minutes=cycle_val,
@@ -236,12 +264,14 @@ async def upload_csv(
     lines = []
     for target, ctx in pairs:
         lines.append(target + "\t" + json.dumps(ctx, ensure_ascii=False))
+
     now = datetime.now(timezone.utc)
     sched_at = None
     if schedule_at:
         sched_at = datetime.fromisoformat(schedule_at)
         if sched_at.tzinfo is None:
             sched_at = sched_at.replace(tzinfo=timezone.utc)
+
     cycle_val = int(cycle_minutes) if is_cyclic and cycle_minutes and cycle_minutes.strip() else None
 
     job = Job(
@@ -251,7 +281,7 @@ async def upload_csv(
         template_ids_blob=json.dumps(template_ids),
         randomize=bool(randomize),
         schedule_at=sched_at,
-        context_json=json.loads(global_ctx) if global_ctx else None,
+        context_json=safe_json_parse(global_ctx),
         account_ids_blob=json.dumps(account_ids),
         is_cyclic=bool(is_cyclic),
         cycle_minutes=cycle_val,
@@ -262,6 +292,7 @@ async def upload_csv(
     logger.info(f"Send job from CSV dispatched: {job.id} status={job.status} schedule_at={job.schedule_at}")
     return RedirectResponse("/logs", status_code=303)
 
+
 @app.get("/logs", response_class=HTMLResponse)
 async def logs_page(request: Request, db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(MessageLog).order_by(MessageLog.id.desc()).limit(500))).scalars().all()
@@ -270,30 +301,34 @@ async def logs_page(request: Request, db: AsyncSession = Depends(get_db)):
     jobs = (await db.execute(select(Job).order_by(Job.id.desc()).limit(50))).scalars().all()
     return templates.TemplateResponse("logs.html", {"request": request, "rows": rows, "accounts": accounts, "templates": templates_rows, "jobs": jobs})
 
+
 @app.post("/jobs/{job_id}/pause")
 async def pause_job(job_id: int, db: AsyncSession = Depends(get_db)):
-    job = (await db.execute(select(Job).where(Job.id==job_id))).scalar_one()
+    job = (await db.execute(select(Job).where(Job.id == job_id))).scalar_one()
     job.paused = not job.paused
     await db.commit()
     logger.info(f"Job {job_id} paused={job.paused}")
     return RedirectResponse("/logs", status_code=303)
 
+
 @app.post("/jobs/{job_id}/stop")
 async def stop_job(job_id: int, db: AsyncSession = Depends(get_db)):
-    job = (await db.execute(select(Job).where(Job.id==job_id))).scalar_one()
+    job = (await db.execute(select(Job).where(Job.id == job_id))).scalar_one()
     job.stopped = True
     await db.commit()
     logger.info(f"Job {job_id} stopped")
     return RedirectResponse("/logs", status_code=303)
 
+
 @app.post("/jobs/{job_id}/delete")
 async def delete_job(job_id: int, db: AsyncSession = Depends(get_db)):
-    job = (await db.execute(select(Job).where(Job.id==job_id))).scalar_one_or_none()
+    job = (await db.execute(select(Job).where(Job.id == job_id))).scalar_one_or_none()
     if job:
         await db.delete(job)
         await db.commit()
         logger.info(f"Job {job_id} deleted permanently")
     return RedirectResponse("/logs", status_code=303)
+
 
 async def scheduler():
     logger.info("Scheduler started")
@@ -308,8 +343,7 @@ async def scheduler():
                     nr = ensure_aware(job.next_run_at)
                     sch = ensure_aware(job.schedule_at)
                     logger.debug(
-                        f"Job {job.id} status={job.status} "
-                        f"paused={job.paused} stopped={job.stopped} next_run_at={nr}"
+                        f"Job {job.id} status={job.status} paused={job.paused} stopped={job.stopped} next_run_at={nr}"
                     )
 
                     if job.stopped or job.paused:
