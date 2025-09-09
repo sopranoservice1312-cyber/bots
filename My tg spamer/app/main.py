@@ -303,31 +303,39 @@ async def scheduler():
                 jobs = (await db.execute(select(Job))).scalars().all()
                 now = datetime.now(timezone.utc)
                 logger.debug(f"Checking {len(jobs)} jobs at {now}")
+
                 for job in jobs:
                     nr = ensure_aware(job.next_run_at)
                     sch = ensure_aware(job.schedule_at)
-                    logger.debug(f"Job {job.id} status={job.status} paused={job.paused} stopped={job.stopped} next_run_at={nr}")
-                    if job.stopped:
+                    logger.debug(
+                        f"Job {job.id} status={job.status} "
+                        f"paused={job.paused} stopped={job.stopped} next_run_at={nr}"
+                    )
+
+                    if job.stopped or job.paused:
                         continue
-                    if job.paused:
-                        continue
+
                     if job.is_cyclic:
                         if nr and nr <= now:
                             logger.info(f"Launching cyclic job {job.id}")
                             job.status = "running"
                             await db.commit()
-                            asyncio.create_task(process_job(db, job, cyclic=True))
+                            asyncio.create_task(process_job(job.id, cyclic=True))
+
                     elif job.status in ("queued", "scheduled"):
                         due = (sch is None) or (sch <= now)
                         if due:
                             logger.info(f"Launching job {job.id}")
                             job.status = "running"
                             await db.commit()
-                            asyncio.create_task(process_job(db, job, cyclic=False))
+                            asyncio.create_task(process_job(job.id, cyclic=False))
+
                 await asyncio.sleep(settings.SCHEDULER_TICK_SECONDS)
+
         except Exception as e:
             logger.exception("Exception in scheduler loop")
             await asyncio.sleep(2)
+
 
 @app.get("/health")
 async def health():
