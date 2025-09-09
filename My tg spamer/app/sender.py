@@ -1,6 +1,7 @@
 import asyncio, random, json
 from datetime import datetime, timezone, timedelta
 from telethon.errors import FloodWaitError, UserPrivacyRestrictedError, ChatAdminRequiredError, PeerIdInvalidError
+from telethon.tl.functions.messages import ImportChatInviteRequest
 from sqlalchemy import select
 from .models import Account, Template, MessageLog, Job
 from .telethon_manager import telethon_manager
@@ -17,10 +18,25 @@ async def resolve_target(client, target: str):
     t = target.strip()
     if not t:
         return None
-    if t.startswith("http"):
-        t = t.split("/")[-1]
+
+    # убираем протоколы и домен
+    t = t.replace("https://", "").replace("http://", "")
+    if t.startswith("t.me/"):
+        t = t.split("t.me/")[-1]
+
+    # @username
     if t.startswith("@"):
         t = t[1:]
+
+    # invite-ссылка вида +xxxx
+    if t.startswith("+"):
+        try:
+            return await client(ImportChatInviteRequest(t[1:]))
+        except Exception as e:
+            logger.warning(f"Invite link error for {t}: {e}")
+            return None
+
+    # обычный username или ID
     try:
         return await client.get_entity(t)
     except Exception:
