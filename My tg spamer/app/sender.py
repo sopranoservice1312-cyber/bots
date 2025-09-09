@@ -1,11 +1,7 @@
 import asyncio, random, json
 from datetime import datetime, timezone, timedelta
-from telethon.errors import (
-    FloodWaitError, UserPrivacyRestrictedError, ChatAdminRequiredError,
-    PeerIdInvalidError, UsernameNotOccupiedError, UsernameInvalidError
-)
-from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
-from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.errors import FloodWaitError, UserPrivacyRestrictedError, ChatAdminRequiredError, PeerIdInvalidError
+from telethon.tl.functions.messages import ImportChatInviteRequest
 from sqlalchemy import select
 from .models import Account, Template, MessageLog, Job
 from .telethon_manager import telethon_manager
@@ -19,47 +15,50 @@ MAX_RETRIES = 3
 
 
 async def resolve_target(client, target: str):
-    """Преобразует ссылку/username/ID в entity для Telethon"""
     t = target.strip()
     if not t:
         return None
 
-    # убираем протоколы
+    logger.debug(f"[resolve_target] Raw target: {target}")
+
+    # убираем протокол
     t = t.replace("https://", "").replace("http://", "")
 
-    # t.me/xxx → xxx
+    # убираем домен
     if t.startswith("t.me/"):
         t = t.split("t.me/")[-1]
+    logger.debug(f"[resolve_target] After cleanup: {t}")
 
-    # @username → username
+    # @username
     if t.startswith("@"):
         t = t[1:]
+        logger.debug(f"[resolve_target] Username cleaned: {t}")
 
-    # приватная инвайт-ссылка
-    if t.startswith("+") or "/joinchat/" in target:
+    # приватные инвайт-ссылки вида t.me/+xxxx или просто +xxxx
+    if t.startswith("+"):
+        invite = t[1:]
         try:
-            invite_hash = t[1:] if t.startswith("+") else t.split("joinchat/")[-1]
-            invite = await client(CheckChatInviteRequest(invite_hash))
-            if invite and getattr(invite, "chat", None):
-                return invite.chat
-            return (await client(ImportChatInviteRequest(invite_hash))).chats[0]
+            logger.debug(f"[resolve_target] Trying ImportChatInviteRequest({invite})")
+            return await client(ImportChatInviteRequest(invite))
         except Exception as e:
-            logger.error(f"[resolve_target] Ошибка при обработке инвайт-ссылки {t}: {e}")
+            logger.error(f"[resolve_target] ImportChatInviteRequest failed for {invite}: {e}")
             return None
 
-    # username или id
+    # обычный username или ID
     try:
-        entity = await client.get_entity(t)
-        return entity
-    except (UsernameNotOccupiedError, UsernameInvalidError):
-        logger.error(f"[resolve_target] Username {t} не существует")
-        return None
-    except ValueError as e:
-        logger.error(f"[resolve_target] {t} недоступен: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"[resolve_target] JoinChannelRequest failed for {t}: {e}")
-        return None
+        logger.debug(f"[resolve_target] Trying get_entity({t})")
+        return await client.get_entity(t)
+    except Exception as e1:
+        logger.warning(f"[resolve_target] get_entity({t}) failed: {e1}")
+        try:
+            if t.isdigit():
+                logger.debug(f"[resolve_target] Trying get_entity(int({t}))")
+                return await client.get_entity(int(t))
+            else:
+                return None
+        except Exception as e2:
+            logger.error(f"[resolve_target] Failed for {t}: {e2}")
+            return None
 
 
 async def process_job(job_id: int, cyclic: bool = False):
@@ -150,7 +149,7 @@ async def process_job(job_id: int, cyclic: bool = False):
 
                 entity = await resolve_target(client, target)
                 if not entity:
-                    log.status, log.error = "failed", "Target not found or no access"
+                    log.status, log.error = "failed", "Target not found"
                     await db.commit()
                     continue
 
