@@ -1,8 +1,9 @@
 uvicorn[standard]
 fastapi
 jinja2
-sqlalchemy>=1.4
-aiosqlite
+sqlalchemy[asyncio]>=1.4
+aiosqlite           # для локальной SQLite
+asyncpg             # для PostgreSQL на Railway
 telethon
 python-dotenv
 python-multipart
