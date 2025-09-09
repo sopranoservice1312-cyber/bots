@@ -1,11 +1,12 @@
 import asyncio, random, json
 from datetime import datetime, timezone, timedelta
 from telethon.errors import (
-    FloodWaitError, UserPrivacyRestrictedError,
-    ChatAdminRequiredError, PeerIdInvalidError
+    FloodWaitError,
+    UserPrivacyRestrictedError,
+    ChatAdminRequiredError,
+    PeerIdInvalidError,
 )
 from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
-from telethon.tl.functions.channels import JoinChannelRequest
 from sqlalchemy import select
 from .models import Account, Template, MessageLog, Job
 from .telethon_manager import telethon_manager
@@ -18,76 +19,55 @@ logger = logging.getLogger(__name__)
 MAX_RETRIES = 3
 
 
-async def resolve_target(client, target: str, log: MessageLog = None, db=None):
+async def resolve_target(client, target: str):
+    """
+    Возвращает (entity, error).
+    Если entity найден -> (entity, None)
+    Если нет -> (None, "описание ошибки")
+    """
     raw = target.strip()
-    logger.debug(f"[resolve_target] Raw target: {raw}")
     if not raw:
-        return None
+        return None, "Empty target"
 
+    logger.debug(f"[resolve_target] Raw target: {raw}")
+
+    # убираем протоколы
     t = raw.replace("https://", "").replace("http://", "")
     if t.startswith("t.me/"):
         t = t.split("t.me/")[-1]
 
-    # invite-ссылка
-    if t.startswith("+"):
-        try:
-            logger.debug(f"[resolve_target] CheckChatInviteRequest({t[1:]})")
-            invite = await client(CheckChatInviteRequest(t[1:]))
-
-            if hasattr(invite, "chat"):
-                logger.info(f"[resolve_target] Invite valid: {invite.chat.title} ({t})")
-            else:
-                logger.warning(f"[resolve_target] Invite invalid or revoked: {t}")
-                if log and db:
-                    log.status, log.error = "failed", "Invite invalid or revoked"
-                    await db.commit()
-                return None
-
-            logger.debug(f"[resolve_target] ImportChatInviteRequest({t[1:]})")
-            return await client(ImportChatInviteRequest(t[1:]))
-        except Exception as e:
-            logger.warning(f"[resolve_target] Invite link error for {t}: {e}")
-            if log and db:
-                log.status, log.error = "failed", f"Invite error: {e}"
-                await db.commit()
-            return None
-
-    # username
     if t.startswith("@"):
         t = t[1:]
 
-    # username или ID
+    logger.debug(f"[resolve_target] After cleanup: {t}")
+
+    # invite-ссылка
+    if t.startswith("+"):
+        try:
+            invite = await client(CheckChatInviteRequest(t[1:]))
+            if invite.chat:
+                entity = await client(ImportChatInviteRequest(t[1:]))
+                return entity, None
+            else:
+                return None, "Invite link invalid or revoked"
+        except Exception as e:
+            logger.error(f"[resolve_target] Invite link error for {t}: {e}")
+            return None, f"Invite link error: {str(e)}"
+
+    # username / id
     try:
         logger.debug(f"[resolve_target] Trying get_entity({t})")
-        return await client.get_entity(t)
-    except Exception as e1:
-        logger.warning(f"[resolve_target] get_entity({t}) failed: {e1}")
-
-        if isinstance(t, str) and not t.isdigit():
-            try:
-                logger.debug(f"[resolve_target] Trying JoinChannelRequest({t})")
-                await client(JoinChannelRequest(t))
-                entity = await client.get_entity(t)
-                logger.info(f"[resolve_target] Successfully joined {t}")
-                return entity
-            except Exception as e2:
-                logger.error(f"[resolve_target] JoinChannelRequest failed for {t}: {e2}")
-                if log and db:
-                    log.status, log.error = "failed", f"JoinChannel error: {e2}"
-                    await db.commit()
-                return None
-
-        if t.isdigit():
-            try:
-                return await client.get_entity(int(t))
-            except Exception as e3:
-                logger.error(f"[resolve_target] get_entity(int) failed for {t}: {e3}")
-                if log and db:
-                    log.status, log.error = "failed", f"Invalid ID: {e3}"
-                    await db.commit()
-                return None
-
-    return None
+        entity = await client.get_entity(t)
+        return entity, None
+    except Exception as e:
+        try:
+            if t.isdigit():
+                entity = await client.get_entity(int(t))
+                return entity, None
+        except Exception:
+            pass
+        logger.warning(f"[resolve_target] get_entity failed for {t}: {e}")
+        return None, f"Target not found or no access: {str(e)}"
 
 
 async def process_job(job_id: int, cyclic: bool = False):
@@ -99,7 +79,7 @@ async def process_job(job_id: int, cyclic: bool = False):
 
         logger.info(f"Starting job {job.id}, cyclic={cyclic}")
 
-        # --- шаблоны
+        # --- загрузка шаблонов
         templates = (
             await db.execute(
                 select(Template).where(Template.id.in_(json.loads(job.template_ids_blob)))
@@ -143,7 +123,7 @@ async def process_job(job_id: int, cyclic: bool = False):
             await db.commit()
             return
 
-        # --- клиенты
+        # --- запуск клиентов
         clients = {}
         try:
             for acc in accs:
@@ -176,11 +156,10 @@ async def process_job(job_id: int, cyclic: bool = False):
                 db.add(log)
                 await db.flush()
 
-                entity = await resolve_target(client, target, log, db)
+                entity, error = await resolve_target(client, target)
                 if not entity:
-                    if log.status == "queued":  # если ещё не обновили
-                        log.status, log.error = "failed", "Target not found or no access"
-                        await db.commit()
+                    log.status, log.error = "failed", error
+                    await db.commit()
                     continue
 
                 await respectful_delay({}, key=str(acc.id))
@@ -208,7 +187,7 @@ async def process_job(job_id: int, cyclic: bool = False):
             for client in clients.values():
                 await telethon_manager.disconnect(client)
 
-        # --- статус задачи
+        # --- обновление статуса
         if job.is_cyclic and not job.stopped:
             job.next_run_at = datetime.now(timezone.utc) + timedelta(
                 minutes=job.cycle_minutes
