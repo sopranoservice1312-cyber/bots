@@ -1,10 +1,9 @@
 import asyncio, random, json
 from datetime import datetime, timezone, timedelta
 from telethon.errors import (
-    FloodWaitError,
-    UserPrivacyRestrictedError,
-    ChatAdminRequiredError,
-    PeerIdInvalidError,
+    FloodWaitError, UserPrivacyRestrictedError, ChatAdminRequiredError,
+    PeerIdInvalidError, ChannelPrivateError, UsernameNotOccupiedError,
+    InviteHashExpiredError, InviteHashInvalidError
 )
 from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
 from sqlalchemy import select
@@ -20,54 +19,54 @@ MAX_RETRIES = 3
 
 
 async def resolve_target(client, target: str):
-    """
-    Возвращает (entity, error).
-    Если entity найден -> (entity, None)
-    Если нет -> (None, "описание ошибки")
-    """
+    """Определение entity по ссылке/юзернейму/инвайту с подробной диагностикой"""
     raw = target.strip()
+    logger.debug(f"[resolve_target] Raw target: {raw}")
     if not raw:
         return None, "Empty target"
 
-    logger.debug(f"[resolve_target] Raw target: {raw}")
-
-    # убираем протоколы
+    # убираем протоколы и домен
     t = raw.replace("https://", "").replace("http://", "")
     if t.startswith("t.me/"):
         t = t.split("t.me/")[-1]
 
+    logger.debug(f"[resolve_target] After cleanup: {t}")
+
+    # username
     if t.startswith("@"):
         t = t[1:]
 
-    logger.debug(f"[resolve_target] After cleanup: {t}")
-
-    # invite-ссылка
+    # инвайт-ссылка
     if t.startswith("+"):
         try:
             invite = await client(CheckChatInviteRequest(t[1:]))
-            if invite.chat:
-                entity = await client(ImportChatInviteRequest(t[1:]))
-                return entity, None
-            else:
-                return None, "Invite link invalid or revoked"
+            if getattr(invite, "chat", None):
+                return await client(ImportChatInviteRequest(t[1:])), None
+            return None, "Invite invalid or expired"
+        except (InviteHashExpiredError, InviteHashInvalidError):
+            return None, "Invite link expired/invalid"
         except Exception as e:
-            logger.error(f"[resolve_target] Invite link error for {t}: {e}")
-            return None, f"Invite link error: {str(e)}"
+            logger.warning(f"[resolve_target] Invite error for {t}: {e}")
+            return None, f"Invite error: {e}"
 
-    # username / id
+    # numeric ID
+    if t.isdigit():
+        try:
+            return await client.get_entity(int(t)), None
+        except Exception as e:
+            return None, f"ID not found: {e}"
+
+    # username / канал
     try:
-        logger.debug(f"[resolve_target] Trying get_entity({t})")
         entity = await client.get_entity(t)
         return entity, None
+    except UsernameNotOccupiedError:
+        return None, "Username not found"
+    except ChannelPrivateError:
+        return None, "Channel is private or no access"
     except Exception as e:
-        try:
-            if t.isdigit():
-                entity = await client.get_entity(int(t))
-                return entity, None
-        except Exception:
-            pass
-        logger.warning(f"[resolve_target] get_entity failed for {t}: {e}")
-        return None, f"Target not found or no access: {str(e)}"
+        logger.warning(f"[resolve_target] get_entity({t}) failed: {e}")
+        return None, f"Target not found or no access: {e}"
 
 
 async def process_job(job_id: int, cyclic: bool = False):
@@ -158,7 +157,7 @@ async def process_job(job_id: int, cyclic: bool = False):
 
                 entity, error = await resolve_target(client, target)
                 if not entity:
-                    log.status, log.error = "failed", error
+                    log.status, log.error = "failed", error or "Target not found"
                     await db.commit()
                     continue
 
