@@ -6,8 +6,12 @@ from .models import Account, Template, MessageLog, Job
 from .telethon_manager import telethon_manager
 from .utils import respectful_delay, render_placeholders
 from .database import AsyncSessionLocal
+import logging
+
+logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
+
 
 async def resolve_target(client, target: str):
     t = target.strip()
@@ -18,30 +22,35 @@ async def resolve_target(client, target: str):
     if t.startswith("@"):
         t = t[1:]
     try:
-        entity = await client.get_entity(t)
-        return entity
+        return await client.get_entity(t)
     except Exception:
         try:
-            entity = await client.get_entity(int(t)) if t.isdigit() else None
-            return entity
+            return await client.get_entity(int(t)) if t.isdigit() else None
         except Exception:
             return None
 
-async def process_job(job_id: int, cyclic=False):
+
+async def process_job(job_id: int, cyclic: bool = False):
     async with AsyncSessionLocal() as db:
         job = await db.get(Job, job_id)
         if not job:
+            logger.warning(f"Job {job_id} not found in DB")
             return
 
-        templates = (await db.execute(
-            select(Template).where(Template.id.in_(json.loads(job.template_ids_blob)))
-        )).scalars().all()
+        logger.info(f"Starting job {job.id}, cyclic={cyclic}")
+
+        # --- загрузка шаблонов
+        templates = (
+            await db.execute(
+                select(Template).where(Template.id.in_(json.loads(job.template_ids_blob)))
+            )
+        ).scalars().all()
         if not templates:
-            job.status = "failed"
-            job.error = "No templates"
+            job.status, job.error = "failed", "No templates"
             await db.commit()
             return
 
+        # --- цели
         try:
             targets = json.loads(job.targets_blob)
             if isinstance(targets, str):
@@ -51,26 +60,30 @@ async def process_job(job_id: int, cyclic=False):
 
         globals_ctx = job.context_json or {}
 
+        # --- аккаунты
         try:
             account_ids = json.loads(job.account_ids_blob)
         except Exception:
             account_ids = []
 
         if not account_ids:
-            job.status = "failed"
-            job.error = "No accounts selected"
+            job.status, job.error = "failed", "No accounts selected"
             await db.commit()
             return
 
-        accs = (await db.execute(
-            select(Account).where(Account.id.in_(account_ids), Account.is_authorized==True)
-        )).scalars().all()
+        accs = (
+            await db.execute(
+                select(Account).where(
+                    Account.id.in_(account_ids), Account.is_authorized.is_(True)
+                )
+            )
+        ).scalars().all()
         if not accs:
-            job.status = "failed"
-            job.error = "No authorized accounts selected"
+            job.status, job.error = "failed", "No authorized accounts selected"
             await db.commit()
             return
 
+        # --- запуск клиентов
         clients = {}
         try:
             for acc in accs:
@@ -78,10 +91,12 @@ async def process_job(job_id: int, cyclic=False):
                     acc.phone, acc.api_id, acc.api_hash
                 )
 
+            # --- рассылка
             for raw in targets:
                 acc = random.choice(accs)
                 client = clients[acc.id]
                 tpl = random.choice(templates) if job.randomize else templates[0]
+
                 ctx = dict(globals_ctx or {})
                 if "\t" in raw:
                     raw_target, raw_ctx = raw.split("\t", 1)
@@ -89,51 +104,58 @@ async def process_job(job_id: int, cyclic=False):
                     target = raw_target
                 else:
                     target = raw
+
                 body = render_placeholders(tpl.body, ctx)
 
-                log = MessageLog(account_id=acc.id, target=target, template_id=tpl.id, status="queued")
+                log = MessageLog(
+                    account_id=acc.id,
+                    target=target,
+                    template_id=tpl.id,
+                    status="queued",
+                )
                 db.add(log)
                 await db.flush()
 
                 entity = await resolve_target(client, target)
                 if not entity:
-                    log.status = "failed"
-                    log.error = "Target not found"
+                    log.status, log.error = "failed", "Target not found"
                     await db.commit()
                     continue
 
                 await respectful_delay({}, key=str(acc.id))
+
                 try:
                     await client.send_message(entity, body)
-                    log.status = "sent"
-                    log.error = None
+                    log.status, log.error = "sent", None
                 except FloodWaitError as e:
-                    log.status = "retried"
-                    log.error = f"FloodWait: wait {e.seconds}s"
+                    log.status, log.error = "retried", f"FloodWait: wait {e.seconds}s"
                     await db.commit()
                     await asyncio.sleep(min(e.seconds + 1, 3600))
                     try:
                         await client.send_message(entity, body)
-                        log.status = "sent"
-                        log.error = None
+                        log.status, log.error = "sent", None
                     except Exception as e2:
-                        log.status = "failed"
-                        log.error = str(e2)
+                        log.status, log.error = "failed", str(e2)
                 except (UserPrivacyRestrictedError, ChatAdminRequiredError, PeerIdInvalidError) as e:
-                    log.status = "skipped"
-                    log.error = e.__class__.__name__
+                    log.status, log.error = "skipped", e.__class__.__name__
                 except Exception as e:
-                    log.status = "failed"
-                    log.error = str(e)
+                    log.status, log.error = "failed", str(e)
+
                 await db.commit()
+
         finally:
             for client in clients.values():
                 await telethon_manager.disconnect(client)
 
+        # --- обновление статуса
         if job.is_cyclic and not job.stopped:
-            job.next_run_at = datetime.now(timezone.utc) + timedelta(minutes=job.cycle_minutes)
+            job.next_run_at = datetime.now(timezone.utc) + timedelta(
+                minutes=job.cycle_minutes
+            )
             job.status = "queued"
-            await db.commit()
+            logger.info(f"Job {job.id} re-queued for {job.next_run_at}")
         else:
             job.status = "finished"
-            await db.commit()
+            logger.info(f"Job {job.id} finished")
+
+        await db.commit()
