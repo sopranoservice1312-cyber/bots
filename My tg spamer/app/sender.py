@@ -120,10 +120,10 @@ async def process_job(db: AsyncSession, job: Job, cyclic=False):
             await telethon_manager.disconnect(client)
 
     if job.is_cyclic and not job.stopped:
-    job.next_run_at = datetime.now(timezone.utc) + timedelta(minutes=job.cycle_minutes)
-    job.status = "queued"
-    await db.commit()
+        job.next_run_at = datetime.now(timezone.utc) + timedelta(minutes=job.cycle_minutes)
+        job.status = "queued"
+        await db.commit()
 
     else:
         job.status = "finished"
-    await db.commit()
+        await db.commit()
