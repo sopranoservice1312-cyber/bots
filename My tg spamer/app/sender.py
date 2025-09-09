@@ -1,8 +1,8 @@
 import asyncio, random, json
 from datetime import datetime, timezone, timedelta
 from telethon.errors import FloodWaitError, UserPrivacyRestrictedError, ChatAdminRequiredError, PeerIdInvalidError
-from telethon.tl.functions.messages import ImportChatInviteRequest
 from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.tl.functions.messages import ImportChatInviteRequest
 from sqlalchemy import select
 from .models import Account, Template, MessageLog, Job
 from .telethon_manager import telethon_manager
@@ -20,47 +20,58 @@ async def resolve_target(client, target: str):
     if not t:
         return None
 
-    logger.debug(f"Resolving target: {target}")
+    logger.info(f"[resolve_target] Resolving: {target}")
 
     # убираем протоколы
     t = t.replace("https://", "").replace("http://", "")
-
-    # ссылки вида t.me/...
     if t.startswith("t.me/"):
         t = t.split("t.me/")[-1]
 
-    # @username
     if t.startswith("@"):
         t = t[1:]
 
-    # invite-ссылка вида +xxxx
+    # приватная инвайт-ссылка вида +xxxx
     if t.startswith("+"):
         try:
+            logger.info(f"[resolve_target] Importing invite: {t}")
             result = await client(ImportChatInviteRequest(t[1:]))
-            return result.chats[0] if result.chats else None
+            chat = result.chats[0] if result.chats else None
+            if chat:
+                logger.info(f"[resolve_target] Joined via invite → {chat.id} ({getattr(chat, 'title', '')})")
+            return chat
         except Exception as e:
-            logger.warning(f"ImportChatInviteRequest failed for {t}: {e}")
+            logger.error(f"[resolve_target] ImportChatInviteRequest failed for {t}: {e}")
             return None
 
-    # пробуем как username
+    # пробуем напрямую
     try:
-        return await client.get_entity(t)
+        entity = await client.get_entity(t)
+        logger.info(f"[resolve_target] get_entity success → {getattr(entity, 'id', '')} ({getattr(entity, 'title', getattr(entity, 'username', ''))})")
+        return entity
     except Exception as e1:
-        logger.warning(f"get_entity failed for {t}: {e1}")
-        try:
-            # пробуем присоединиться через JoinChannelRequest
-            result = await client(JoinChannelRequest(t))
-            return result.chats[0] if result.chats else None
-        except Exception as e2:
-            logger.warning(f"JoinChannelRequest failed for {t}: {e2}")
+        logger.warning(f"[resolve_target] get_entity failed for {t}: {e1}")
 
-    # пробуем как числовой ID
+        # пробуем вступить в публичный канал
+        try:
+            logger.info(f"[resolve_target] Trying JoinChannelRequest {t}")
+            result = await client(JoinChannelRequest(t))
+            chat = result.chats[0] if result.chats else None
+            if chat:
+                logger.info(f"[resolve_target] Joined channel → {chat.id} ({getattr(chat, 'title', '')})")
+            return chat
+        except Exception as e2:
+            logger.error(f"[resolve_target] JoinChannelRequest failed for {t}: {e2}")
+
+    # если это числовой id
     if t.isdigit():
         try:
-            return await client.get_entity(int(t))
+            entity = await client.get_entity(int(t))
+            logger.info(f"[resolve_target] Resolved by ID → {entity.id}")
+            return entity
         except Exception as e3:
-            logger.warning(f"get_entity by ID failed for {t}: {e3}")
+            logger.error(f"[resolve_target] get_entity by ID failed for {t}: {e3}")
 
+    logger.error(f"[resolve_target] Target could not be resolved: {target}")
     return None
 
 
@@ -71,7 +82,7 @@ async def process_job(job_id: int, cyclic: bool = False):
             logger.warning(f"Job {job_id} not found in DB")
             return
 
-        logger.info(f"Starting job {job.id}, cyclic={cyclic}")
+        logger.info(f"=== Starting job {job.id}, cyclic={cyclic} ===")
 
         # --- загрузка шаблонов
         templates = (
@@ -141,6 +152,7 @@ async def process_job(job_id: int, cyclic: bool = False):
 
                 body = render_placeholders(tpl.body, ctx)
 
+                # создаём лог заранее
                 log = MessageLog(
                     account_id=acc.id,
                     target=target,
@@ -150,30 +162,42 @@ async def process_job(job_id: int, cyclic: bool = False):
                 db.add(log)
                 await db.flush()
 
+                logger.info(f"[process_job] Resolving target {target} with account {acc.phone}")
                 entity = await resolve_target(client, target)
+
                 if not entity:
                     log.status, log.error = "failed", "Target not found"
+                    logger.error(f"[process_job] Target not found: {target}")
                     await db.commit()
                     continue
+
+                # сохраняем entity.id в лог
+                log.entity_id = getattr(entity, "id", None)
 
                 await respectful_delay({}, key=str(acc.id))
 
                 try:
                     await client.send_message(entity, body)
                     log.status, log.error = "sent", None
+                    logger.info(f"[process_job] Sent message to {target} (entity_id={log.entity_id})")
                 except FloodWaitError as e:
                     log.status, log.error = "retried", f"FloodWait: wait {e.seconds}s"
+                    logger.warning(f"[process_job] FloodWait {e.seconds}s for {target}")
                     await db.commit()
                     await asyncio.sleep(min(e.seconds + 1, 3600))
                     try:
                         await client.send_message(entity, body)
                         log.status, log.error = "sent", None
+                        logger.info(f"[process_job] Retried and sent to {target}")
                     except Exception as e2:
                         log.status, log.error = "failed", str(e2)
+                        logger.error(f"[process_job] Retry failed for {target}: {e2}")
                 except (UserPrivacyRestrictedError, ChatAdminRequiredError, PeerIdInvalidError) as e:
                     log.status, log.error = "skipped", e.__class__.__name__
+                    logger.warning(f"[process_job] Skipped {target}: {e.__class__.__name__}")
                 except Exception as e:
                     log.status, log.error = "failed", str(e)
+                    logger.error(f"[process_job] Failed to send to {target}: {e}")
 
                 await db.commit()
 
