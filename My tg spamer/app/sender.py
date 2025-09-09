@@ -2,6 +2,7 @@ import asyncio, random, json
 from datetime import datetime, timezone, timedelta
 from telethon.errors import FloodWaitError, UserPrivacyRestrictedError, ChatAdminRequiredError, PeerIdInvalidError
 from telethon.tl.functions.messages import ImportChatInviteRequest
+from telethon.tl.functions.channels import JoinChannelRequest
 from sqlalchemy import select
 from .models import Account, Template, MessageLog, Job
 from .telethon_manager import telethon_manager
@@ -19,8 +20,12 @@ async def resolve_target(client, target: str):
     if not t:
         return None
 
-    # убираем протоколы и домен
+    logger.debug(f"Resolving target: {target}")
+
+    # убираем протоколы
     t = t.replace("https://", "").replace("http://", "")
+
+    # ссылки вида t.me/...
     if t.startswith("t.me/"):
         t = t.split("t.me/")[-1]
 
@@ -31,19 +36,32 @@ async def resolve_target(client, target: str):
     # invite-ссылка вида +xxxx
     if t.startswith("+"):
         try:
-            return await client(ImportChatInviteRequest(t[1:]))
+            result = await client(ImportChatInviteRequest(t[1:]))
+            return result.chats[0] if result.chats else None
         except Exception as e:
-            logger.warning(f"Invite link error for {t}: {e}")
+            logger.warning(f"ImportChatInviteRequest failed for {t}: {e}")
             return None
 
-    # обычный username или ID
+    # пробуем как username
     try:
         return await client.get_entity(t)
-    except Exception:
+    except Exception as e1:
+        logger.warning(f"get_entity failed for {t}: {e1}")
         try:
-            return await client.get_entity(int(t)) if t.isdigit() else None
-        except Exception:
-            return None
+            # пробуем присоединиться через JoinChannelRequest
+            result = await client(JoinChannelRequest(t))
+            return result.chats[0] if result.chats else None
+        except Exception as e2:
+            logger.warning(f"JoinChannelRequest failed for {t}: {e2}")
+
+    # пробуем как числовой ID
+    if t.isdigit():
+        try:
+            return await client.get_entity(int(t))
+        except Exception as e3:
+            logger.warning(f"get_entity by ID failed for {t}: {e3}")
+
+    return None
 
 
 async def process_job(job_id: int, cyclic: bool = False):
