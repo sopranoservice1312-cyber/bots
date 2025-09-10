@@ -49,6 +49,9 @@ def safe_json_parse(raw: str | None):
 async def startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        from sqlalchemy import text
+        await conn.execute(text("ALTER TABLE message_logs ADD COLUMN IF NOT EXISTS peer_id BIGINT"))
+        await conn.execute(text("ALTER TABLE message_logs ADD COLUMN IF NOT EXISTS access_hash BIGINT"))
     logger.info("Application startup complete. Launching scheduler.")
     asyncio.create_task(scheduler())
 
