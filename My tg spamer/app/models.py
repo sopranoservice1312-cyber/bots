@@ -54,3 +54,5 @@ class MessageLog(Base):
     error = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     account = relationship("Account", back_populates="logs")
+    peer_id = Column(BigInteger, nullable=True)
+    access_hash = Column(BigInteger, nullable=True)
