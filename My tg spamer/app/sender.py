@@ -7,6 +7,7 @@ from telethon.errors import (
     UserAlreadyParticipantError
 )
 from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
+from telethon.tl.types import InputPeerUser, InputPeerChannel, InputPeerChat
 from sqlalchemy import select
 from .models import Account, Template, MessageLog, Job
 from .telethon_manager import telethon_manager
@@ -16,24 +17,17 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-MAX_RETRIES = 3
-
 
 async def resolve_target(client, target: str):
-    """Определение entity по ссылке/юзернейму/инвайту с подробной диагностикой"""
+    """Определение entity по ссылке/юзернейму/инвайту"""
     raw = target.strip()
-    logger.debug(f"[resolve_target] Raw target: {raw}")
     if not raw:
         return None, "Empty target"
 
-    # убираем протоколы и домен
     t = raw.replace("https://", "").replace("http://", "")
     if t.startswith("t.me/"):
         t = t.split("t.me/")[-1]
 
-    logger.debug(f"[resolve_target] After cleanup: {t}")
-
-    # username
     if t.startswith("@"):
         t = t[1:]
 
@@ -43,27 +37,22 @@ async def resolve_target(client, target: str):
             invite = await client(CheckChatInviteRequest(t[1:]))
             if getattr(invite, "chat", None):
                 try:
-                    # пробуем вступить
                     return await client(ImportChatInviteRequest(t[1:])), None
                 except UserAlreadyParticipantError:
-                    # уже в чате — просто берём сущность
                     entity = await client.get_entity(invite.chat)
                     return entity, None
             return None, "Invite invalid or expired"
         except (InviteHashExpiredError, InviteHashInvalidError):
             return None, "Invite link expired/invalid"
         except Exception as e:
-            logger.warning(f"[resolve_target] Invite error for {t}: {e}")
             return None, f"Invite error: {e}"
 
-    # numeric ID
     if t.isdigit():
         try:
             return await client.get_entity(int(t)), None
         except Exception as e:
             return None, f"ID not found: {e}"
 
-    # username / канал
     try:
         entity = await client.get_entity(t)
         return entity, None
@@ -72,8 +61,24 @@ async def resolve_target(client, target: str):
     except ChannelPrivateError:
         return None, "Channel is private or no access"
     except Exception as e:
-        logger.warning(f"[resolve_target] get_entity({t}) failed: {e}")
         return None, f"Target not found or no access: {e}"
+
+
+async def get_entity_from_cache(client, log: MessageLog):
+    """Восстановить entity из сохранённых peer_id/access_hash"""
+    try:
+        if log.peer_id and log.access_hash:
+            # может быть канал или пользователь
+            if str(log.peer_id).startswith("-100"):  # супер-группа/канал
+                return InputPeerChannel(channel_id=abs(int(log.peer_id + 1000000000000)), access_hash=log.access_hash)
+            else:
+                return InputPeerUser(user_id=log.peer_id, access_hash=log.access_hash)
+        elif log.peer_id:
+            # старые чаты без access_hash
+            return InputPeerChat(chat_id=log.peer_id)
+    except Exception as e:
+        logger.warning(f"[get_entity_from_cache] Failed: {e}")
+    return None
 
 
 async def process_job(job_id: int, cyclic: bool = False):
@@ -85,7 +90,7 @@ async def process_job(job_id: int, cyclic: bool = False):
 
         logger.info(f"Starting job {job.id}, cyclic={cyclic}")
 
-        # --- загрузка шаблонов
+        # --- шаблоны
         templates = (
             await db.execute(
                 select(Template).where(Template.id.in_(json.loads(job.template_ids_blob)))
@@ -112,11 +117,6 @@ async def process_job(job_id: int, cyclic: bool = False):
         except Exception:
             account_ids = []
 
-        if not account_ids:
-            job.status, job.error = "failed", "No accounts selected"
-            await db.commit()
-            return
-
         accs = (
             await db.execute(
                 select(Account).where(
@@ -125,11 +125,11 @@ async def process_job(job_id: int, cyclic: bool = False):
             )
         ).scalars().all()
         if not accs:
-            job.status, job.error = "failed", "No authorized accounts selected"
+            job.status, job.error = "failed", "No authorized accounts"
             await db.commit()
             return
 
-        # --- запуск клиентов
+        # --- клиенты
         clients = {}
         try:
             for acc in accs:
@@ -162,39 +162,29 @@ async def process_job(job_id: int, cyclic: bool = False):
                 db.add(log)
                 await db.flush()
 
-                # --- пробуем использовать сохранённый peer_id
-                entity, error = None, None
-                if getattr(log, "peer_id", None):
-                    try:
-                        entity = await client.get_input_entity(log.peer_id)
-                        logger.debug(f"[process_job] Using cached peer {log.peer_id}")
-                    except Exception as e:
-                        logger.warning(f"[process_job] Failed cached peer: {e}")
-                        entity, error = await resolve_target(client, target)
-                else:
+                # --- пробуем взять из кеша
+                entity = await get_entity_from_cache(client, log)
+                error = None
+
+                if not entity:
                     entity, error = await resolve_target(client, target)
+                    if entity:
+                        # сохраняем peer_id/access_hash
+                        log.peer_id = getattr(entity, "id", None)
+                        log.access_hash = getattr(entity, "access_hash", None)
 
                 if not entity:
                     log.status, log.error = "failed", error or "Target not found"
                     await db.commit()
                     continue
 
-                # --- сохраняем peer_id и access_hash для будущих циклов
-                try:
-                    log.peer_id = getattr(entity, "id", None)
-                    log.access_hash = getattr(entity, "access_hash", None)
-                except Exception:
-                    pass
-                await db.commit()
-
-                # --- задержка перед отправкой
                 await respectful_delay({}, key=str(acc.id))
 
                 try:
                     await client.send_message(entity, body)
                     log.status, log.error = "sent", None
                 except FloodWaitError as e:
-                    log.status, log.error = "retried", f"FloodWait: wait {e.seconds}s"
+                    log.status, log.error = "retried", f"FloodWait {e.seconds}s"
                     await db.commit()
                     await asyncio.sleep(min(e.seconds + 1, 3600))
                     try:
@@ -219,9 +209,7 @@ async def process_job(job_id: int, cyclic: bool = False):
                 minutes=job.cycle_minutes
             )
             job.status = "queued"
-            logger.info(f"Job {job.id} re-queued for {job.next_run_at}")
         else:
             job.status = "finished"
-            logger.info(f"Job {job.id} finished")
 
         await db.commit()
