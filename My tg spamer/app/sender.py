@@ -4,7 +4,7 @@ from telethon.errors import (
     FloodWaitError, UserPrivacyRestrictedError, ChatAdminRequiredError,
     PeerIdInvalidError, ChannelPrivateError, UsernameNotOccupiedError,
     InviteHashExpiredError, InviteHashInvalidError,
-    UserAlreadyParticipantError  # 👈 добавлено
+    UserAlreadyParticipantError
 )
 from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
 from sqlalchemy import select
@@ -162,12 +162,32 @@ async def process_job(job_id: int, cyclic: bool = False):
                 db.add(log)
                 await db.flush()
 
-                entity, error = await resolve_target(client, target)
+                # --- пробуем использовать сохранённый peer_id
+                entity, error = None, None
+                if getattr(log, "peer_id", None):
+                    try:
+                        entity = await client.get_input_entity(log.peer_id)
+                        logger.debug(f"[process_job] Using cached peer {log.peer_id}")
+                    except Exception as e:
+                        logger.warning(f"[process_job] Failed cached peer: {e}")
+                        entity, error = await resolve_target(client, target)
+                else:
+                    entity, error = await resolve_target(client, target)
+
                 if not entity:
                     log.status, log.error = "failed", error or "Target not found"
                     await db.commit()
                     continue
 
+                # --- сохраняем peer_id и access_hash для будущих циклов
+                try:
+                    log.peer_id = getattr(entity, "id", None)
+                    log.access_hash = getattr(entity, "access_hash", None)
+                except Exception:
+                    pass
+                await db.commit()
+
+                # --- задержка перед отправкой
                 await respectful_delay({}, key=str(acc.id))
 
                 try:
