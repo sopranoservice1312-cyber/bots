@@ -3,7 +3,8 @@ from datetime import datetime, timezone, timedelta
 from telethon.errors import (
     FloodWaitError, UserPrivacyRestrictedError, ChatAdminRequiredError,
     PeerIdInvalidError, ChannelPrivateError, UsernameNotOccupiedError,
-    InviteHashExpiredError, InviteHashInvalidError
+    InviteHashExpiredError, InviteHashInvalidError,
+    UserAlreadyParticipantError  # 👈 добавлено
 )
 from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
 from sqlalchemy import select
@@ -41,7 +42,13 @@ async def resolve_target(client, target: str):
         try:
             invite = await client(CheckChatInviteRequest(t[1:]))
             if getattr(invite, "chat", None):
-                return await client(ImportChatInviteRequest(t[1:])), None
+                try:
+                    # пробуем вступить
+                    return await client(ImportChatInviteRequest(t[1:])), None
+                except UserAlreadyParticipantError:
+                    # уже в чате — просто берём сущность
+                    entity = await client.get_entity(invite.chat)
+                    return entity, None
             return None, "Invite invalid or expired"
         except (InviteHashExpiredError, InviteHashInvalidError):
             return None, "Invite link expired/invalid"
