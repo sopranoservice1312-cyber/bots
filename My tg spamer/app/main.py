@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy import insert
 from sqlalchemy import delete
 from .database import Base, engine, get_db
 from .models import Account, Template, MessageLog, Job
