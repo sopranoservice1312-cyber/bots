@@ -52,7 +52,6 @@ class Job(Base):
     stopped = Column(Boolean, default=False)
     next_run_at = Column(DateTime(timezone=True), nullable=True)
 
-    # связь с логами
     logs = relationship("MessageLog", back_populates="job", cascade="all, delete-orphan")
 
 
@@ -72,3 +71,20 @@ class MessageLog(Base):
 
     account = relationship("Account", back_populates="logs")
     job = relationship("Job", back_populates="logs")
+
+
+class FloodRestriction(Base):
+    """
+    Кэш ограничений FloodWait:
+      - account_id + peer_id = уникальная пара
+      - until хранит время, до которого нельзя отправлять
+    """
+    __tablename__ = "flood_restrictions"
+
+    id = Column(Integer, primary_key=True)
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), index=True, nullable=False)
+    peer_id = Column(BigInteger, nullable=False, default=0)  # 0 = глобальный лимит аккаунта
+    until = Column(DateTime(timezone=True), nullable=False)
+
+    def __repr__(self):
+        return f"<FloodRestriction acc={self.account_id} peer={self.peer_id} until={self.until}>"
