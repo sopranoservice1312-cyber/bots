@@ -9,7 +9,7 @@ from telethon.errors import (
 from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
 from telethon.tl.types import InputPeerUser, InputPeerChannel, InputPeerChat
 from sqlalchemy import select
-from .models import Account, Template, MessageLog, Job
+from .models import Account, Template, MessageLog, Job, FloodRestriction
 from .telethon_manager import telethon_manager
 from .utils import respectful_delay, render_placeholders
 from .database import AsyncSessionLocal
@@ -17,12 +17,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Глобальный кэш ограничений после FloodWait
-flood_restrictions: dict[str, datetime] = {}
-
 
 def normalize_target(raw: str) -> str:
-    """Привести target к стандартному виду (username/ID/инвайт)"""
     t = raw.strip()
     if not t:
         return ""
@@ -35,13 +31,11 @@ def normalize_target(raw: str) -> str:
 
 
 async def resolve_target(client, target: str):
-    """Определение entity по username/ID/инвайту"""
     t = normalize_target(target)
     if not t:
         return None, "Empty target"
 
-    # инвайт-ссылка
-    if t.startswith("+"):
+    if t.startswith("+"):  # инвайт
         try:
             invite = await client(CheckChatInviteRequest(t[1:]))
             if getattr(invite, "chat", None):
@@ -62,7 +56,6 @@ async def resolve_target(client, target: str):
         except Exception as e:
             return None, f"ID not found: {e}"
 
-    # username / публичная ссылка
     try:
         entity = await client.get_entity(t)
         return entity, None
@@ -71,7 +64,6 @@ async def resolve_target(client, target: str):
     except ChannelPrivateError:
         return None, "Channel is private or no access"
     except Exception as e1:
-        # fallback через get_input_entity
         try:
             entity = await client.get_input_entity(t)
             return entity, None
@@ -80,10 +72,9 @@ async def resolve_target(client, target: str):
 
 
 async def get_entity_from_cache(client, log: MessageLog):
-    """Восстановить entity из сохранённых peer_id/access_hash"""
     try:
         if log.peer_id and log.access_hash:
-            if str(log.peer_id).startswith("-100"):  # супер-группа/канал
+            if str(log.peer_id).startswith("-100"):
                 return InputPeerChannel(channel_id=abs(int(log.peer_id)), access_hash=log.access_hash)
             else:
                 return InputPeerUser(user_id=log.peer_id, access_hash=log.access_hash)
@@ -94,6 +85,41 @@ async def get_entity_from_cache(client, log: MessageLog):
     return None
 
 
+# --- Flood restriction helpers ---
+async def get_flood_until(account_id: int, peer_id: int | None):
+    async with AsyncSessionLocal() as db:
+        fr = await db.scalar(
+            select(FloodRestriction).where(
+                FloodRestriction.account_id == account_id,
+                FloodRestriction.peer_id == (peer_id or 0)
+            )
+        )
+        if fr and fr.until > datetime.now(timezone.utc):
+            return fr.until
+        return None
+
+
+async def set_flood_until(account_id: int, peer_id: int | None, until):
+    async with AsyncSessionLocal() as db:
+        fr = await db.scalar(
+            select(FloodRestriction).where(
+                FloodRestriction.account_id == account_id,
+                FloodRestriction.peer_id == (peer_id or 0)
+            )
+        )
+        if fr:
+            fr.until = until
+        else:
+            fr = FloodRestriction(
+                account_id=account_id,
+                peer_id=peer_id or 0,
+                until=until
+            )
+            db.add(fr)
+        await db.commit()
+
+
+# --- Main job processor ---
 async def process_job(job_id: int, cyclic: bool = False):
     db = AsyncSessionLocal()
     try:
@@ -104,7 +130,6 @@ async def process_job(job_id: int, cyclic: bool = False):
 
         logger.info(f"Starting job {job.id}, cyclic={cyclic}")
 
-        # --- загрузка шаблонов
         templates = (
             await db.execute(
                 select(Template).where(Template.id.in_(json.loads(job.template_ids_blob)))
@@ -115,7 +140,6 @@ async def process_job(job_id: int, cyclic: bool = False):
             await db.commit()
             return
 
-        # --- цели
         try:
             targets = json.loads(job.targets_blob)
             if isinstance(targets, str):
@@ -123,13 +147,8 @@ async def process_job(job_id: int, cyclic: bool = False):
         except Exception:
             targets = [t.strip() for t in job.targets_blob.splitlines() if t.strip()]
 
-        # нормализуем и убираем дубликаты
-        targets = [normalize_target(t) for t in targets if t]
-        targets = list(dict.fromkeys(targets))
-
         globals_ctx = job.context_json or {}
 
-        # --- аккаунты
         try:
             account_ids = json.loads(job.account_ids_blob)
         except Exception:
@@ -147,7 +166,6 @@ async def process_job(job_id: int, cyclic: bool = False):
             await db.commit()
             return
 
-        # --- запуск клиентов
         clients = {}
         try:
             for acc in accs:
@@ -155,14 +173,20 @@ async def process_job(job_id: int, cyclic: bool = False):
                     acc.phone, acc.api_id, acc.api_hash
                 )
 
-            # --- рассылка
-            for target in targets:
+            for raw in targets:
                 acc = random.choice(accs)
                 client = clients[acc.id]
                 tpl = random.choice(templates) if job.randomize else templates[0]
 
                 ctx = dict(globals_ctx or {})
+                if "\t" in raw:
+                    raw_target, raw_ctx = raw.split("\t", 1)
+                    ctx.update(json.loads(raw_ctx))
+                    target = raw_target
+                else:
+                    target = raw
 
+                norm_target = normalize_target(target)
                 body = render_placeholders(tpl.body, ctx)
 
                 log = MessageLog(
@@ -174,20 +198,11 @@ async def process_job(job_id: int, cyclic: bool = False):
                 db.add(log)
                 await db.flush()
 
-                # flood-cache проверка
-                now = datetime.now(timezone.utc)
-                if target in flood_restrictions and now < flood_restrictions[target]:
-                    log.status, log.error = "skipped", f"FloodWait active until {flood_restrictions[target]}"
-                    logger.warning(f"[Job {job.id}] Skipped {target}: floodwait active")
-                    await db.commit()
-                    continue
-
-                # --- пробуем взять entity
                 entity = await get_entity_from_cache(client, log)
                 error = None
 
                 if not entity:
-                    entity, error = await resolve_target(client, target)
+                    entity, error = await resolve_target(client, norm_target)
                     if entity:
                         if hasattr(entity, "id"):
                             log.peer_id = entity.id
@@ -200,7 +215,15 @@ async def process_job(job_id: int, cyclic: bool = False):
                     await db.commit()
                     continue
 
-                # --- отправка
+                # --- flood check ---
+                now = datetime.now(timezone.utc)
+                until = await get_flood_until(acc.id, getattr(entity, "id", 0))
+                if until and until > now:
+                    log.status, log.error = "skipped", f"FloodWait until {until}"
+                    logger.warning(f"[Job {job.id}] Skipped {target}, wait until {until}")
+                    await db.commit()
+                    continue
+
                 await respectful_delay({}, key=str(acc.id))
                 try:
                     logger.info(f"[Job {job.id}] Sending message to {target} via {acc.phone}")
@@ -209,9 +232,9 @@ async def process_job(job_id: int, cyclic: bool = False):
                     logger.info(f"[Job {job.id}] Message sent successfully to {target}")
                 except FloodWaitError as e:
                     until = now + timedelta(seconds=e.seconds)
-                    flood_restrictions[target] = until
-                    log.status, log.error = "skipped", f"FloodWait {e.seconds}s (until {until})"
-                    logger.warning(f"[Job {job.id}] FloodWait {e.seconds}s for {target}, skip until {until}")
+                    await set_flood_until(acc.id, getattr(entity, "id", 0), until)
+                    log.status, log.error = "skipped", f"FloodWait {e.seconds}s"
+                    logger.warning(f"[Job {job.id}] FloodWait {e.seconds}s on {acc.phone}, skipping until {until}")
                 except (UserPrivacyRestrictedError, ChatAdminRequiredError, PeerIdInvalidError) as e:
                     log.status, log.error = "skipped", e.__class__.__name__
                     logger.warning(f"[Job {job.id}] Skipped {target}: {e.__class__.__name__}")
@@ -225,11 +248,8 @@ async def process_job(job_id: int, cyclic: bool = False):
             for client in clients.values():
                 await telethon_manager.disconnect(client)
 
-        # --- обновление статуса
         if job.is_cyclic and not job.stopped:
-            job.next_run_at = datetime.now(timezone.utc) + timedelta(
-                minutes=job.cycle_minutes
-            )
+            job.next_run_at = datetime.now(timezone.utc) + timedelta(minutes=job.cycle_minutes)
             job.status = "queued"
             logger.info(f"Job {job.id} re-queued for {job.next_run_at}")
         else:
