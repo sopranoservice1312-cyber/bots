@@ -64,17 +64,19 @@ async def resolve_target(client, target: str):
         return None, f"Target not found or no access: {e}"
 
 
-async def get_entity_from_cache(client, log: MessageLog):
+async def get_entity_from_cache(log: MessageLog):
     """Восстановить entity из сохранённых peer_id/access_hash"""
     try:
         if log.peer_id and log.access_hash:
-            # может быть канал или пользователь
-            if str(log.peer_id).startswith("-100"):  # супер-группа/канал
-                return InputPeerChannel(channel_id=abs(int(log.peer_id + 1000000000000)), access_hash=log.access_hash)
+            # Канал или супер-группа
+            if str(log.peer_id).startswith("-100"):
+                channel_id = int(str(log.peer_id).replace("-100", ""))
+                return InputPeerChannel(channel_id=channel_id, access_hash=log.access_hash)
             else:
+                # юзер
                 return InputPeerUser(user_id=log.peer_id, access_hash=log.access_hash)
         elif log.peer_id:
-            # старые чаты без access_hash
+            # обычный чат без access_hash
             return InputPeerChat(chat_id=log.peer_id)
     except Exception as e:
         logger.warning(f"[get_entity_from_cache] Failed: {e}")
@@ -163,15 +165,17 @@ async def process_job(job_id: int, cyclic: bool = False):
                 await db.flush()
 
                 # --- пробуем взять из кеша
-                entity = await get_entity_from_cache(client, log)
+                entity = await get_entity_from_cache(log)
                 error = None
 
                 if not entity:
                     entity, error = await resolve_target(client, target)
                     if entity:
                         # сохраняем peer_id/access_hash
-                        log.peer_id = getattr(entity, "id", None)
-                        log.access_hash = getattr(entity, "access_hash", None)
+                        if hasattr(entity, "id"):
+                            log.peer_id = entity.id
+                        if hasattr(entity, "access_hash"):
+                            log.access_hash = entity.access_hash
 
                 if not entity:
                     log.status, log.error = "failed", error or "Target not found"
