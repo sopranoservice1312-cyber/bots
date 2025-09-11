@@ -53,6 +53,7 @@ async def resolve_target(client, target: str):
         except Exception as e:
             return None, f"ID not found: {e}"
 
+    # username / публичная ссылка
     try:
         entity = await client.get_entity(t)
         return entity, None
@@ -60,23 +61,24 @@ async def resolve_target(client, target: str):
         return None, "Username not found"
     except ChannelPrivateError:
         return None, "Channel is private or no access"
-    except Exception as e:
-        return None, f"Target not found or no access: {e}"
+    except Exception as e1:
+        # fallback через get_input_entity
+        try:
+            entity = await client.get_input_entity(t)
+            return entity, None
+        except Exception as e2:
+            return None, f"Target not found or no access: {e1} / fallback: {e2}"
 
 
-async def get_entity_from_cache(log: MessageLog):
+async def get_entity_from_cache(client, log: MessageLog):
     """Восстановить entity из сохранённых peer_id/access_hash"""
     try:
         if log.peer_id and log.access_hash:
-            # Канал или супер-группа
-            if str(log.peer_id).startswith("-100"):
-                channel_id = int(str(log.peer_id).replace("-100", ""))
-                return InputPeerChannel(channel_id=channel_id, access_hash=log.access_hash)
+            if str(log.peer_id).startswith("-100"):  # супер-группа/канал
+                return InputPeerChannel(channel_id=abs(int(log.peer_id)), access_hash=log.access_hash)
             else:
-                # юзер
                 return InputPeerUser(user_id=log.peer_id, access_hash=log.access_hash)
         elif log.peer_id:
-            # обычный чат без access_hash
             return InputPeerChat(chat_id=log.peer_id)
     except Exception as e:
         logger.warning(f"[get_entity_from_cache] Failed: {e}")
@@ -84,7 +86,8 @@ async def get_entity_from_cache(log: MessageLog):
 
 
 async def process_job(job_id: int, cyclic: bool = False):
-    async with AsyncSessionLocal() as db:
+    db = AsyncSessionLocal()
+    try:
         job = await db.get(Job, job_id)
         if not job:
             logger.warning(f"Job {job_id} not found in DB")
@@ -92,7 +95,7 @@ async def process_job(job_id: int, cyclic: bool = False):
 
         logger.info(f"Starting job {job.id}, cyclic={cyclic}")
 
-        # --- шаблоны
+        # --- загрузка шаблонов
         templates = (
             await db.execute(
                 select(Template).where(Template.id.in_(json.loads(job.template_ids_blob)))
@@ -131,7 +134,7 @@ async def process_job(job_id: int, cyclic: bool = False):
             await db.commit()
             return
 
-        # --- клиенты
+        # --- запуск клиентов
         clients = {}
         try:
             for acc in accs:
@@ -164,42 +167,47 @@ async def process_job(job_id: int, cyclic: bool = False):
                 db.add(log)
                 await db.flush()
 
-                # --- пробуем взять из кеша
-                entity = await get_entity_from_cache(log)
+                # --- пробуем взять entity
+                entity = await get_entity_from_cache(client, log)
                 error = None
 
                 if not entity:
                     entity, error = await resolve_target(client, target)
                     if entity:
-                        # сохраняем peer_id/access_hash
-                        if hasattr(entity, "id"):
-                            log.peer_id = entity.id
-                        if hasattr(entity, "access_hash"):
-                            log.access_hash = entity.access_hash
+                        log.peer_id = getattr(entity, "id", None)
+                        log.access_hash = getattr(entity, "access_hash", None)
 
                 if not entity:
                     log.status, log.error = "failed", error or "Target not found"
+                    logger.warning(f"[Job {job.id}] Target {target} failed: {log.error}")
                     await db.commit()
                     continue
 
+                # --- отправка
                 await respectful_delay({}, key=str(acc.id))
-
                 try:
+                    logger.info(f"[Job {job.id}] Sending message to {target} via {acc.phone}")
                     await client.send_message(entity, body)
                     log.status, log.error = "sent", None
+                    logger.info(f"[Job {job.id}] Message sent successfully to {target}")
                 except FloodWaitError as e:
                     log.status, log.error = "retried", f"FloodWait {e.seconds}s"
                     await db.commit()
+                    logger.warning(f"[Job {job.id}] FloodWait {e.seconds}s on {acc.phone}, retrying...")
                     await asyncio.sleep(min(e.seconds + 1, 3600))
                     try:
                         await client.send_message(entity, body)
                         log.status, log.error = "sent", None
+                        logger.info(f"[Job {job.id}] Retry success to {target}")
                     except Exception as e2:
                         log.status, log.error = "failed", str(e2)
+                        logger.error(f"[Job {job.id}] Retry failed to {target}: {e2}")
                 except (UserPrivacyRestrictedError, ChatAdminRequiredError, PeerIdInvalidError) as e:
                     log.status, log.error = "skipped", e.__class__.__name__
+                    logger.warning(f"[Job {job.id}] Skipped {target}: {e.__class__.__name__}")
                 except Exception as e:
                     log.status, log.error = "failed", str(e)
+                    logger.error(f"[Job {job.id}] Failed to send to {target}: {e}")
 
                 await db.commit()
 
@@ -213,7 +221,14 @@ async def process_job(job_id: int, cyclic: bool = False):
                 minutes=job.cycle_minutes
             )
             job.status = "queued"
+            logger.info(f"Job {job.id} re-queued for {job.next_run_at}")
         else:
             job.status = "finished"
+            logger.info(f"Job {job.id} finished")
 
         await db.commit()
+
+    except Exception as e:
+        logger.error(f"[process_job] Fatal error: {e}", exc_info=True)
+    finally:
+        await db.close()
