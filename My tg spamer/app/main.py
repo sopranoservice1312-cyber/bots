@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy import insert
 from sqlalchemy import delete
+from sqlalchemy.dialects.postgresql import insert
 from .database import Base, engine, get_db
 from .models import Account, Template, MessageLog, Job
 from .telethon_manager import telethon_manager
@@ -93,22 +94,21 @@ async def add_account(
         session_path=session_path,
         is_authorized=False,
         api_id=api_id,
-        api_hash=api_hash
+        api_hash=api_hash,
     ).on_conflict_do_update(
-        index_elements=['phone'],
+        index_elements=[Account.phone],  # уникальное поле
         set_={
             "name": name,
             "session_path": session_path,
             "api_id": api_id,
             "api_hash": api_hash,
-            "is_authorized": False
+            "is_authorized": False,
         }
-    ).returning(Account.id)
+    )
 
-    result = await db.execute(stmt)
-    acc_id = result.scalar_one()
+    await db.execute(stmt)
     await db.commit()
-    logger.info(f"Account upserted: {phone} (id={acc_id})")
+    logger.info(f"Account added or updated: {phone}")
     return RedirectResponse("/accounts", status_code=303)
 
 
