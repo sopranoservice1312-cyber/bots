@@ -18,18 +18,24 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-async def resolve_target(client, target: str):
-    """Определение entity по ссылке/юзернейму/инвайту"""
-    raw = target.strip()
-    if not raw:
-        return None, "Empty target"
-
-    t = raw.replace("https://", "").replace("http://", "")
+def normalize_target(raw: str) -> str:
+    """Привести target к стандартному виду (username/ID/инвайт)"""
+    t = raw.strip()
+    if not t:
+        return ""
+    t = t.replace("https://", "").replace("http://", "")
     if t.startswith("t.me/"):
         t = t.split("t.me/")[-1]
-
     if t.startswith("@"):
         t = t[1:]
+    return t
+
+
+async def resolve_target(client, target: str):
+    """Определение entity по username/ID/инвайту"""
+    t = normalize_target(target)
+    if not t:
+        return None, "Empty target"
 
     # инвайт-ссылка
     if t.startswith("+"):
@@ -156,6 +162,7 @@ async def process_job(job_id: int, cyclic: bool = False):
                 else:
                     target = raw
 
+                norm_target = normalize_target(target)
                 body = render_placeholders(tpl.body, ctx)
 
                 log = MessageLog(
@@ -172,14 +179,16 @@ async def process_job(job_id: int, cyclic: bool = False):
                 error = None
 
                 if not entity:
-                    entity, error = await resolve_target(client, target)
+                    entity, error = await resolve_target(client, norm_target)
                     if entity:
-                        log.peer_id = getattr(entity, "id", None)
-                        log.access_hash = getattr(entity, "access_hash", None)
+                        if hasattr(entity, "id"):
+                            log.peer_id = entity.id
+                        if hasattr(entity, "access_hash"):
+                            log.access_hash = entity.access_hash
 
                 if not entity:
                     log.status, log.error = "failed", error or "Target not found"
-                    logger.warning(f"[Job {job.id}] Target {target} failed: {log.error}")
+                    logger.warning(f"[Job {job.id}] Target {target} ({norm_target}) failed: {log.error}")
                     await db.commit()
                     continue
 
