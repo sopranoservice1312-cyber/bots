@@ -327,6 +327,8 @@ async def stop_job(job_id: int, db: AsyncSession = Depends(get_db)):
 async def delete_job(job_id: int, db: AsyncSession = Depends(get_db)):
     job = (await db.execute(select(Job).where(Job.id == job_id))).scalar_one_or_none()
     if job:
+         from sqlalchemy import delete
+        await db.execute(delete(MessageLog).where(MessageLog.job_id == job_id))
         await db.delete(job)
         await db.commit()
         logger.info(f"Job {job_id} deleted permanently")
