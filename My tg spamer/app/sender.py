@@ -1,4 +1,4 @@
-import asyncio, random, json
+import asyncio, random, json, logging
 from datetime import datetime, timezone, timedelta
 from telethon.errors import (
     FloodWaitError, UserPrivacyRestrictedError, ChatAdminRequiredError,
@@ -13,11 +13,12 @@ from .models import Account, Template, MessageLog, Job, FloodRestriction
 from .telethon_manager import telethon_manager
 from .utils import respectful_delay, render_placeholders
 from .database import AsyncSessionLocal
-import logging
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 
+# --- Normalization ---
 def normalize_target(raw: str) -> str:
     t = raw.strip()
     if not t:
@@ -30,6 +31,7 @@ def normalize_target(raw: str) -> str:
     return t
 
 
+# --- Target resolving ---
 async def resolve_target(client, target: str):
     t = normalize_target(target)
     if not t:
@@ -262,3 +264,35 @@ async def process_job(job_id: int, cyclic: bool = False):
         logger.error(f"[process_job] Fatal error: {e}", exc_info=True)
     finally:
         await db.close()
+
+
+# --- Scheduler loop ---
+async def scheduler_loop(poll_interval: int = 30):
+    logger.info("Scheduler started")
+    while True:
+        try:
+            async with AsyncSessionLocal() as db:
+                now = datetime.now(timezone.utc)
+                jobs = (
+                    await db.execute(
+                        select(Job).where(
+                            Job.status == "queued",
+                            (Job.next_run_at == None) | (Job.next_run_at <= now)
+                        )
+                    )
+                ).scalars().all()
+
+                for job in jobs:
+                    asyncio.create_task(process_job(job.id, cyclic=job.is_cyclic))
+        except Exception as e:
+            logger.error(f"[scheduler_loop] Error: {e}", exc_info=True)
+
+        await asyncio.sleep(poll_interval)
+
+
+# --- Entrypoint ---
+if __name__ == "__main__":
+    try:
+        asyncio.run(scheduler_loop(20))  # проверка каждые 20 секунд
+    except KeyboardInterrupt:
+        logger.info("Scheduler stopped")
