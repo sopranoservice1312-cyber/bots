@@ -17,6 +17,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Глобальный кэш ограничений после FloodWait
+flood_restrictions: dict[str, datetime] = {}
+
 
 def normalize_target(raw: str) -> str:
     """Привести target к стандартному виду (username/ID/инвайт)"""
@@ -120,6 +123,10 @@ async def process_job(job_id: int, cyclic: bool = False):
         except Exception:
             targets = [t.strip() for t in job.targets_blob.splitlines() if t.strip()]
 
+        # нормализуем и убираем дубликаты
+        targets = [normalize_target(t) for t in targets if t]
+        targets = list(dict.fromkeys(targets))
+
         globals_ctx = job.context_json or {}
 
         # --- аккаунты
@@ -149,20 +156,13 @@ async def process_job(job_id: int, cyclic: bool = False):
                 )
 
             # --- рассылка
-            for raw in targets:
+            for target in targets:
                 acc = random.choice(accs)
                 client = clients[acc.id]
                 tpl = random.choice(templates) if job.randomize else templates[0]
 
                 ctx = dict(globals_ctx or {})
-                if "\t" in raw:
-                    raw_target, raw_ctx = raw.split("\t", 1)
-                    ctx.update(json.loads(raw_ctx))
-                    target = raw_target
-                else:
-                    target = raw
 
-                norm_target = normalize_target(target)
                 body = render_placeholders(tpl.body, ctx)
 
                 log = MessageLog(
@@ -174,12 +174,20 @@ async def process_job(job_id: int, cyclic: bool = False):
                 db.add(log)
                 await db.flush()
 
+                # flood-cache проверка
+                now = datetime.now(timezone.utc)
+                if target in flood_restrictions and now < flood_restrictions[target]:
+                    log.status, log.error = "skipped", f"FloodWait active until {flood_restrictions[target]}"
+                    logger.warning(f"[Job {job.id}] Skipped {target}: floodwait active")
+                    await db.commit()
+                    continue
+
                 # --- пробуем взять entity
                 entity = await get_entity_from_cache(client, log)
                 error = None
 
                 if not entity:
-                    entity, error = await resolve_target(client, norm_target)
+                    entity, error = await resolve_target(client, target)
                     if entity:
                         if hasattr(entity, "id"):
                             log.peer_id = entity.id
@@ -188,7 +196,7 @@ async def process_job(job_id: int, cyclic: bool = False):
 
                 if not entity:
                     log.status, log.error = "failed", error or "Target not found"
-                    logger.warning(f"[Job {job.id}] Target {target} ({norm_target}) failed: {log.error}")
+                    logger.warning(f"[Job {job.id}] Target {target} failed: {log.error}")
                     await db.commit()
                     continue
 
@@ -200,17 +208,10 @@ async def process_job(job_id: int, cyclic: bool = False):
                     log.status, log.error = "sent", None
                     logger.info(f"[Job {job.id}] Message sent successfully to {target}")
                 except FloodWaitError as e:
-                    log.status, log.error = "retried", f"FloodWait {e.seconds}s"
-                    await db.commit()
-                    logger.warning(f"[Job {job.id}] FloodWait {e.seconds}s on {acc.phone}, retrying...")
-                    await asyncio.sleep(min(e.seconds + 1, 3600))
-                    try:
-                        await client.send_message(entity, body)
-                        log.status, log.error = "sent", None
-                        logger.info(f"[Job {job.id}] Retry success to {target}")
-                    except Exception as e2:
-                        log.status, log.error = "failed", str(e2)
-                        logger.error(f"[Job {job.id}] Retry failed to {target}: {e2}")
+                    until = now + timedelta(seconds=e.seconds)
+                    flood_restrictions[target] = until
+                    log.status, log.error = "skipped", f"FloodWait {e.seconds}s (until {until})"
+                    logger.warning(f"[Job {job.id}] FloodWait {e.seconds}s for {target}, skip until {until}")
                 except (UserPrivacyRestrictedError, ChatAdminRequiredError, PeerIdInvalidError) as e:
                     log.status, log.error = "skipped", e.__class__.__name__
                     logger.warning(f"[Job {job.id}] Skipped {target}: {e.__class__.__name__}")
