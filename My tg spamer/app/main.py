@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy import delete
 from .database import Base, engine, get_db
 from .models import Account, Template, MessageLog, Job
 from .telethon_manager import telethon_manager
@@ -327,7 +328,6 @@ async def stop_job(job_id: int, db: AsyncSession = Depends(get_db)):
 async def delete_job(job_id: int, db: AsyncSession = Depends(get_db)):
     job = (await db.execute(select(Job).where(Job.id == job_id))).scalar_one_or_none()
     if job:
-         from sqlalchemy import delete
         await db.execute(delete(MessageLog).where(MessageLog.job_id == job_id))
         await db.delete(job)
         await db.commit()
