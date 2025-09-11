@@ -85,17 +85,29 @@ async def add_account(
     session_path = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "sessions", f"{phone.replace('+','plus')}.session")
     )
-    acc = Account(
+
+    stmt = insert(Account).values(
         phone=phone,
         name=name,
         session_path=session_path,
         is_authorized=False,
         api_id=api_id,
         api_hash=api_hash
-    )
-    db.add(acc)
+    ).on_conflict_do_update(
+        index_elements=['phone'],
+        set_={
+            "name": name,
+            "session_path": session_path,
+            "api_id": api_id,
+            "api_hash": api_hash,
+            "is_authorized": False
+        }
+    ).returning(Account.id)
+
+    result = await db.execute(stmt)
+    acc_id = result.scalar_one()
     await db.commit()
-    logger.info(f"Account added: {phone}")
+    logger.info(f"Account upserted: {phone} (id={acc_id})")
     return RedirectResponse("/accounts", status_code=303)
 
 
@@ -110,21 +122,38 @@ async def add_and_login(
     session_path = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "sessions", f"{phone.replace('+','plus')}.session")
     )
-    acc = Account(
+
+    stmt = insert(Account).values(
         phone=phone,
         name=name,
         session_path=session_path,
         is_authorized=False,
         api_id=api_id,
-        api_hash=api_hash,
-    )
-    db.add(acc)
+        api_hash=api_hash
+    ).on_conflict_do_update(
+        index_elements=['phone'],
+        set_={
+            "name": name,
+            "session_path": session_path,
+            "api_id": api_id,
+            "api_hash": api_hash,
+            "is_authorized": False
+        }
+    ).returning(Account.id, Account.phone)
+
+    result = await db.execute(stmt)
+    acc_id, acc_phone = result.one()
     await db.commit()
-    phone_code_hash = await telethon_manager.start_login(acc.phone, api_id=api_id, api_hash=api_hash)
+
+    phone_code_hash = await telethon_manager.start_login(acc_phone, api_id=api_id, api_hash=api_hash)
+    # обновим phone_code_hash
+    acc = (await db.execute(select(Account).where(Account.id == acc_id))).scalar_one()
     acc.phone_code_hash = phone_code_hash
     await db.commit()
-    logger.info(f"Account added and login started: {phone}")
-    return RedirectResponse(f"/accounts/{acc.id}/login", status_code=303)
+
+    logger.info(f"Account upserted and login started: {phone}")
+    return RedirectResponse(f"/accounts/{acc_id}/login", status_code=303)
+
 
 
 @app.post("/accounts/{acc_id}/delete")
