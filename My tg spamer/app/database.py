@@ -8,7 +8,15 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data.db")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
 
-engine = create_async_engine(DATABASE_URL, echo=False, future=True)
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+    future=True,
+    pool_size=20,        # стандарт 5 → увеличиваем
+    max_overflow=40,     # запас для пиков
+    pool_timeout=60,     # ждем соединение дольше
+    pool_recycle=1800,   # раз в 30 мин коннект сбрасывается
+)
 AsyncSessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
 
